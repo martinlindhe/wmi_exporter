@@ -3,7 +3,7 @@
 package collector
 
 import (
-	"strconv"
+	"fmt"
 	"strings"
 
 	"github.com/StackExchange/wmi"
@@ -23,10 +23,10 @@ var (
 		"collector.service.services-where",
 		"WQL 'where' clause to use in WMI metrics query. Limits the response to the services you specify and reduces the size of the response.",
 	).Default("").String()
-	wmiDisabled = kingpin.Flag(
-		"collector.service.disable-wmi",
-		"Disables collection using WMI. API calls will used in this mode. Flag 'collector.service.services-where' won't be effective.",
-	).Default("true").Bool()
+	enableWMI = kingpin.Flag(
+		"collector.service.enable-wmi",
+		"Enables metric collection using WMI. If false, API calls will used instead. Flag 'collector.service.services-where' won't be effective if set to false.",
+	).Default("false").Bool()
 )
 
 // A serviceCollector is a Prometheus collector for WMI Win32_Service metrics
@@ -46,8 +46,8 @@ func NewserviceCollector() (Collector, error) {
 	if *serviceWhereClause == "" {
 		log.Warn("No where-clause specified for service collector. This will generate a very large number of metrics!")
 	}
-	if *wmiDisabled {
-		log.Warn("WMI collection is disabled.")
+	if *enableWMI {
+		log.Warn("WMI collection is enabled.")
 	}
 
 	return &serviceCollector{
@@ -82,8 +82,14 @@ func NewserviceCollector() (Collector, error) {
 // Collect sends the metric values for each metric
 // to the provided prometheus Metric channel.
 func (c *serviceCollector) Collect(ctx *ScrapeContext, ch chan<- prometheus.Metric) error {
-	if desc, err := c.collect(ch); err != nil {
-		log.Error("failed collecting service metrics:", desc, err)
+	if *enableWMI {
+		if err := c.collectWMI(ch); err != nil {
+			log.Error("failed collecting service metrics:", err)
+			return err
+		}
+	}
+	if err := c.collectAPI(ch); err != nil {
+		log.Error("failed collecting service metrics:", err)
 		return err
 	}
 	return nil
@@ -151,160 +157,148 @@ var (
 	}
 )
 
-func (c *serviceCollector) collect(ch chan<- prometheus.Metric) (*prometheus.Desc, error) {
-	if *wmiDisabled {
-		svcmgrConnection, err := mgr.Connect()
-		if err != nil {
-			return nil, err
+func (c *serviceCollector) collectWMI(ch chan<- prometheus.Metric) error {
+	var dst []Win32_Service
+	q := queryAllWhere(&dst, c.queryWhereClause)
+	if err := wmi.Query(q, &dst); err != nil {
+		return err
+	}
+	for _, service := range dst {
+		pid := fmt.Sprintf("%d", uint64(service.ProcessId))
+
+		runAs := ""
+		if service.StartName != nil {
+			runAs = *service.StartName
 		}
-		defer svcmgrConnection.Disconnect()
+		ch <- prometheus.MustNewConstMetric(
+			c.Information,
+			prometheus.GaugeValue,
+			1.0,
+			strings.ToLower(service.Name),
+			service.DisplayName,
+			pid,
+			runAs,
+		)
 
-		// List All Services from the Services Manager
-		serviceList, err := svcmgrConnection.ListServices()
-		if err != nil {
-			return nil, err
-		}
-
-		// Iterate through the Services List
-		for _, service := range serviceList {
-			// Retrieve handle for each service
-			serviceHandle, err := svcmgrConnection.OpenService(service)
-			if err != nil {
-				continue
-			}
-
-			// Get Service Configuration
-			serviceConfig, err := serviceHandle.Config()
-			if err != nil {
-				_ = serviceHandle.Close()
-				continue
-			}
-
-			// Get Service Current Status
-			serviceStatus, err := serviceHandle.Query()
-			if err != nil {
-				_ = serviceHandle.Close()
-				continue
-			}
-
-			pid := strconv.FormatUint(uint64(serviceStatus.ProcessId), 10)
-
-			ch <- prometheus.MustNewConstMetric(
-				c.Information,
-				prometheus.GaugeValue,
-				1.0,
-				strings.ToLower(service),
-				serviceConfig.DisplayName,
-				pid,
-				serviceConfig.ServiceStartName,
-			)
-
-			for _, state := range apiStateValues {
-				isCurrentState := 0.0
-				if state == apiStateValues[uint(serviceStatus.State)] {
-					isCurrentState = 1.0
-				}
-				ch <- prometheus.MustNewConstMetric(
-					c.State,
-					prometheus.GaugeValue,
-					isCurrentState,
-					strings.ToLower(service),
-					state,
-				)
-			}
-
-			for _, startMode := range apiStartModeValues {
-				isCurrentStartMode := 0.0
-				if startMode == apiStartModeValues[serviceConfig.StartType] {
-					isCurrentStartMode = 1.0
-				}
-				ch <- prometheus.MustNewConstMetric(
-					c.StartMode,
-					prometheus.GaugeValue,
-					isCurrentStartMode,
-					strings.ToLower(service),
-					startMode,
-				)
-			}
-
-			//Status is kept for backward compatibility. No status is reported as active
-			for _, status := range allStatuses {
-				isCurrentStatus := 0.0
-				ch <- prometheus.MustNewConstMetric(
-					c.Status,
-					prometheus.GaugeValue,
-					isCurrentStatus,
-					strings.ToLower(service),
-					status,
-				)
-			}
-		}
-
-	} else {
-		var dst []Win32_Service
-		q := queryAllWhere(&dst, c.queryWhereClause)
-		if err := wmi.Query(q, &dst); err != nil {
-			return nil, err
-		}
-		for _, service := range dst {
-			pid := strconv.FormatUint(uint64(service.ProcessId), 10)
-
-			runAs := ""
-			if service.StartName != nil {
-				runAs = *service.StartName
+		for _, state := range allStates {
+			isCurrentState := 0.0
+			if state == strings.ToLower(service.State) {
+				isCurrentState = 1.0
 			}
 			ch <- prometheus.MustNewConstMetric(
-				c.Information,
+				c.State,
 				prometheus.GaugeValue,
-				1.0,
+				isCurrentState,
 				strings.ToLower(service.Name),
-				service.DisplayName,
-				pid,
-				runAs,
+				state,
 			)
+		}
 
-			for _, state := range allStates {
-				isCurrentState := 0.0
-				if state == strings.ToLower(service.State) {
-					isCurrentState = 1.0
-				}
-				ch <- prometheus.MustNewConstMetric(
-					c.State,
-					prometheus.GaugeValue,
-					isCurrentState,
-					strings.ToLower(service.Name),
-					state,
-				)
+		for _, startMode := range allStartModes {
+			isCurrentStartMode := 0.0
+			if startMode == strings.ToLower(service.StartMode) {
+				isCurrentStartMode = 1.0
 			}
+			ch <- prometheus.MustNewConstMetric(
+				c.StartMode,
+				prometheus.GaugeValue,
+				isCurrentStartMode,
+				strings.ToLower(service.Name),
+				startMode,
+			)
+		}
 
-			for _, startMode := range allStartModes {
-				isCurrentStartMode := 0.0
-				if startMode == strings.ToLower(service.StartMode) {
-					isCurrentStartMode = 1.0
-				}
-				ch <- prometheus.MustNewConstMetric(
-					c.StartMode,
-					prometheus.GaugeValue,
-					isCurrentStartMode,
-					strings.ToLower(service.Name),
-					startMode,
-				)
+		for _, status := range allStatuses {
+			isCurrentStatus := 0.0
+			if status == strings.ToLower(service.Status) {
+				isCurrentStatus = 1.0
 			}
-
-			for _, status := range allStatuses {
-				isCurrentStatus := 0.0
-				if status == strings.ToLower(service.Status) {
-					isCurrentStatus = 1.0
-				}
-				ch <- prometheus.MustNewConstMetric(
-					c.Status,
-					prometheus.GaugeValue,
-					isCurrentStatus,
-					strings.ToLower(service.Name),
-					status,
-				)
-			}
+			ch <- prometheus.MustNewConstMetric(
+				c.Status,
+				prometheus.GaugeValue,
+				isCurrentStatus,
+				strings.ToLower(service.Name),
+				status,
+			)
 		}
 	}
-	return nil, nil
+	return nil
+}
+
+func (c *serviceCollector) collectAPI(ch chan<- prometheus.Metric) error {
+	svcmgrConnection, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer svcmgrConnection.Disconnect()
+
+	// List All Services from the Services Manager
+	serviceList, err := svcmgrConnection.ListServices()
+	if err != nil {
+		return err
+	}
+
+	// Iterate through the Services List
+	for _, service := range serviceList {
+		// Retrieve handle for each service
+		serviceHandle, err := svcmgrConnection.OpenService(service)
+		if err != nil {
+			continue
+		}
+
+		// Get Service Configuration
+		serviceConfig, err := serviceHandle.Config()
+		if err != nil {
+			_ = serviceHandle.Close()
+			continue
+		}
+
+		// Get Service Current Status
+		serviceStatus, err := serviceHandle.Query()
+		if err != nil {
+			_ = serviceHandle.Close()
+			continue
+		}
+
+		pid := fmt.Sprintf("%d", uint64(serviceStatus.ProcessId))
+
+		ch <- prometheus.MustNewConstMetric(
+			c.Information,
+			prometheus.GaugeValue,
+			1.0,
+			strings.ToLower(service),
+			serviceConfig.DisplayName,
+			pid,
+			serviceConfig.ServiceStartName,
+		)
+
+		for _, state := range apiStateValues {
+			isCurrentState := 0.0
+			if state == apiStateValues[uint(serviceStatus.State)] {
+				isCurrentState = 1.0
+			}
+			ch <- prometheus.MustNewConstMetric(
+				c.State,
+				prometheus.GaugeValue,
+				isCurrentState,
+				strings.ToLower(service),
+				state,
+			)
+		}
+
+		for _, startMode := range apiStartModeValues {
+			isCurrentStartMode := 0.0
+			if startMode == apiStartModeValues[serviceConfig.StartType] {
+				isCurrentStartMode = 1.0
+			}
+			ch <- prometheus.MustNewConstMetric(
+				c.StartMode,
+				prometheus.GaugeValue,
+				isCurrentStartMode,
+				strings.ToLower(service),
+				startMode,
+			)
+		}
+	}
+	return nil
 }
