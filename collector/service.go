@@ -26,7 +26,7 @@ var (
 	disableWMI = kingpin.Flag(
 		"collector.service.disable-wmi",
 		"Disables metric collection using WMI. API calls will used instead. Flag 'collector.service.services-where' won't be effective.",
-	).Default("false").Bool()
+	).Default("true").Bool()
 )
 
 // A serviceCollector is a Prometheus collector for WMI Win32_Service metrics
