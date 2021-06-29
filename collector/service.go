@@ -23,9 +23,9 @@ var (
 		"collector.service.services-where",
 		"WQL 'where' clause to use in WMI metrics query. Limits the response to the services you specify and reduces the size of the response.",
 	).Default("").String()
-	enableWMI = kingpin.Flag(
-		"collector.service.enable-wmi",
-		"Enables metric collection using WMI. If false, API calls will used instead. Flag 'collector.service.services-where' won't be effective if set to false.",
+	disableWMI = kingpin.Flag(
+		"collector.service.disable-wmi",
+		"Disables metric collection using WMI. API calls will used instead. Flag 'collector.service.services-where' won't be effective.",
 	).Default("false").Bool()
 )
 
@@ -46,8 +46,8 @@ func NewserviceCollector() (Collector, error) {
 	if *serviceWhereClause == "" {
 		log.Warn("No where-clause specified for service collector. This will generate a very large number of metrics!")
 	}
-	if *enableWMI {
-		log.Warn("WMI collection is enabled.")
+	if *disableWMI {
+		log.Warn("WMI collection is disabled.")
 	}
 
 	return &serviceCollector{
@@ -82,13 +82,13 @@ func NewserviceCollector() (Collector, error) {
 // Collect sends the metric values for each metric
 // to the provided prometheus Metric channel.
 func (c *serviceCollector) Collect(ctx *ScrapeContext, ch chan<- prometheus.Metric) error {
-	if *enableWMI {
-		if err := c.collectWMI(ch); err != nil {
+	if *disableWMI {
+		if err := c.collectAPI(ch); err != nil {
 			log.Error("failed collecting service metrics:", err)
 			return err
 		}
 	}
-	if err := c.collectAPI(ch); err != nil {
+	if err := c.collectWMI(ch); err != nil {
 		log.Error("failed collecting service metrics:", err)
 		return err
 	}
