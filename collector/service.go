@@ -24,7 +24,7 @@ var (
 		"WQL 'where' clause to use in WMI metrics query. Limits the response to the services you specify and reduces the size of the response.",
 	).Default("").String()
 	useAPI = kingpin.Flag(
-		"collector.service.useAPI",
+		"collector.service.use-api",
 		"Use API calls to collect service data instead of WMI. Flag 'collector.service.services-where' won't be effective.",
 	).Default("false").Bool()
 )
